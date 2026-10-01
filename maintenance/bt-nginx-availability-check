@@ -1,0 +1,18 @@
+#!/bin/bash
+set -eu
+exec 9>/run/lock/bt-nginx-availability.lock
+flock -n 9 || exit 0
+exec 8>/run/lock/bt-cpu-guard-maintenance.lock
+flock -n 8 || exit 0
+if pgrep -f '^nginx: master process ' >/dev/null; then exit 0; fi
+nginx=/www/server/nginx/sbin/nginx.real_btclean
+[ -x "$nginx" ] || nginx=/www/server/nginx/sbin/nginx
+args=(-p /www/server/nginx/ -c /www/server/nginx/conf/nginx.conf)
+if ! "$nginx" "${args[@]}" -t; then
+    logger -t bt-nginx-availability 'Nginx absent but configuration invalid; automatic start refused'
+    exit 1
+fi
+logger -t bt-nginx-availability 'Nginx master absent and configuration valid; attempting start'
+"$nginx" "${args[@]}"
+sleep 2
+pgrep -f '^nginx: master process ' >/dev/null

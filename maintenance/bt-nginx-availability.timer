@@ -1,0 +1,11 @@
+[Unit]
+Description=Check BaoTa Nginx availability every minute
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=bt-nginx-availability.service
+
+[Install]
+WantedBy=timers.target

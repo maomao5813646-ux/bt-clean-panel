@@ -1,0 +1,3 @@
+panel/script/*.sh text eol=lf
+maintenance/*.py text eol=lf
+maintenance/bt-nginx-availability* text eol=lf

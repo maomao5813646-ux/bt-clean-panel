@@ -1,0 +1,8 @@
+[Unit]
+Description=Validate and recover absent BaoTa Nginx without stopping running workers
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bt-nginx-availability-check
+TimeoutStartSec=45
