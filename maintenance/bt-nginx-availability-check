@@ -13,6 +13,6 @@ if ! "$nginx" "${args[@]}" -t; then
     exit 1
 fi
 logger -t bt-nginx-availability 'Nginx master absent and configuration valid; attempting start'
-"$nginx" "${args[@]}"
+"$nginx" "${args[@]}" 8>&- 9>&-
 sleep 2
 pgrep -f '^nginx: master process ' >/dev/null

@@ -40,6 +40,21 @@ and the units under `/etc/systemd/system/`, validate the script, then enable the
 timer. Stop `bt-nginx-availability.timer` before deliberately stopping Nginx for
 maintenance. Invalid configuration is logged and never started automatically.
 
+### Recovery lifecycle correction (2026-10-03)
+
+The original oneshot unit inherited `KillMode=control-group`: after a recovery
+start, systemd terminated the Nginx processes when the check exited. It now uses
+`KillMode=process` because Nginx is intentionally not owned by this short-lived
+check. The Nginx launch also closes lock descriptors 8 and 9 so the detached
+master cannot retain the maintenance locks. Do not remove these safeguards.
+
+Validation must cover the absent-master branch through service completion and
+subsequent timer cycles, not just a success exit code while Nginx already runs.
+On 2026-10-03, recovery on the affected host was verified after the oneshot exited,
+including multiple timer cycles, unchanged master PID, released maintenance
+lock, upstream health 200, and public redirect-chain final status 200. No running
+production instance was stopped to manufacture this test.
+
 ## Rollback
 
 Restore the backed-up guard, not an old entire vhost directory. Disable the

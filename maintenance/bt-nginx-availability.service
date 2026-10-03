@@ -4,5 +4,7 @@ After=network.target
 
 [Service]
 Type=oneshot
+# Nginx is deliberately detached and must survive completion of this check.
+KillMode=process
 ExecStart=/usr/local/sbin/bt-nginx-availability-check
 TimeoutStartSec=45
