@@ -1,3 +1,5 @@
 panel/script/*.sh text eol=lf
+panel/install/*.sh text eol=lf
+maintenance/*.lua text eol=lf
 maintenance/*.py text eol=lf
 maintenance/bt-nginx-availability* text eol=lf
