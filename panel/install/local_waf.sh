@@ -1204,6 +1204,90 @@ class local_waf_main:
             "message": (out or "ok").strip(),
         })
 
+    def _origin_rules(self):
+        import subprocess
+        import shlex
+        result = subprocess.run(["/usr/sbin/ufw", "show", "added"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=15)
+        if result.returncode:
+            raise ValueError(result.stderr or "Cannot read firewall rules")
+        entries = []
+        for line in result.stdout.splitlines():
+            parts = shlex.split(line)
+            if "comment" not in parts or parts[parts.index("comment") + 1] != "bt-clean-origin-whitelist":
+                continue
+            if parts[:2] != ["ufw", "allow"] or "from" not in parts:
+                raise ValueError("Unexpected managed firewall rule")
+            entries.append(parts)
+        return entries
+
+    def get_origin_whitelist(self, get=None):
+        try:
+            values = sorted(set(p[p.index("from") + 1] for p in self._origin_rules()))
+            return {"status": True, "entries": values}
+        except Exception as e:
+            return public.returnMsg(False, str(e))
+
+    def save_origin_whitelist(self, get):
+        import ipaddress
+        import subprocess
+        import tempfile
+        import shutil
+        import fcntl
+        try:
+            raw = str(get.get("entries", ""))
+            if len(raw) > 8192:
+                raise ValueError("Too many entries")
+            values = []
+            for item in raw.splitlines():
+                item = item.strip()
+                if not item:
+                    continue
+                network = ipaddress.ip_network(item, strict=False)
+                if network.prefixlen == 0 or network.is_multicast or network.is_unspecified:
+                    raise ValueError("Unsafe network: " + item)
+                value = str(network) if network.prefixlen != network.max_prefixlen else str(network.network_address)
+                if value not in values:
+                    values.append(value)
+            if len(values) > 100:
+                raise ValueError("Maximum 100 entries")
+            def command(args):
+                p = subprocess.run(["/usr/sbin/ufw"] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
+                if p.returncode:
+                    raise ValueError(p.stderr or p.stdout or "Firewall command failed")
+                return p.stdout
+            with open("/www/server/panel/data/origin-whitelist.lock", "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if "Status: active" not in command(["status"]):
+                    raise ValueError("UFW is not active")
+                old = self._origin_rules()
+                existing = sorted(set(p[p.index("from") + 1] for p in old))
+                if sorted(values) == existing:
+                    return {"status": True, "entries": existing}
+                backup = tempfile.mkdtemp(prefix="origin-whitelist-", dir="/www/server/panel/data")
+                for name in ("user.rules", "user6.rules"):
+                    shutil.copy2("/etc/ufw/" + name, backup + "/" + name)
+                try:
+                    for p in old:
+                        command(["--force", "delete"] + p[1:])
+                    # Refuse collisions with rules owned by another feature.
+                    status = command(["status"])
+                    for value in values:
+                        if re.search(r"(?<![\w.:/])" + re.escape(value) + r"(?![\w.:/])", status):
+                            raise ValueError("IP already has firewall rules; leave them unchanged: " + value)
+                        for port in ("80", "443"):
+                            command(["allow", "proto", "tcp", "from", value, "to", "any", "port", port, "comment", "bt-clean-origin-whitelist"])
+                    applied = self._origin_rules()
+                    if len(applied) != 2 * len(values):
+                        raise ValueError("Firewall verification failed")
+                except Exception:
+                    for name in ("user.rules", "user6.rules"):
+                        shutil.copy2(backup + "/" + name, "/etc/ufw/" + name)
+                    command(["reload"])
+                    raise
+                return {"status": True, "entries": values, "backup": backup}
+        except Exception as e:
+            return public.returnMsg(False, str(e))
+
     def set_enable(self, get):
         enabled = str(get.get("enabled", "1")) in ("1", "true", "True", "on")
         cfg = self._read_json()
@@ -1516,6 +1600,14 @@ EOF
   <div class="local-waf-body">
     <div data-panel="home">
       <div class="waf-card"><div class="waf-inline"><label class="waf-toggle">&#38450;&#28779;&#22681;&#24320;&#20851; <input type="checkbox" id="waf-enabled" class="waf-switch"><span id="waf-enabled-text">&#20851;&#38381;</span></label><label class="waf-toggle" style="margin-left:28px">Cloudflare &#28304;&#31449;&#38145;&#23450; <input type="checkbox" id="cloudflare-origin-enabled" class="waf-switch"><span id="cloudflare-origin-text">&#20851;&#38381;</span></label></div><div class="waf-form-desc">&#24320;&#21551;&#21518;&#65292;80/443 &#20165;&#20801;&#35768; Cloudflare &#23448;&#26041; IP &#32593;&#27573;&#35775;&#38382;&#65292;SSH&#12289;&#38754;&#26495;&#31471;&#21475;&#21644;&#20854;&#20182;&#19994;&#21153;&#31471;&#21475;&#19981;&#21463;&#24433;&#21709;&#12290;</div></div>
+      <div class="waf-form-row" style="margin:16px 0">
+        <label class="waf-form-label" for="origin-whitelist">源站访问白名单</label>
+        <div class="waf-form-main">
+          <textarea id="origin-whitelist" class="bt-input-text" rows="4" style="width:100%;max-width:560px;height:100px" placeholder="来源 IPv4 / IPv6 / CIDR，每行一条"></textarea>
+          <div style="margin-top:8px"><button id="origin-whitelist-save" class="btn btn-success btn-sm" disabled>保存白名单</button> <span id="origin-whitelist-result" role="status"></span></div>
+          <div class="waf-form-desc">放行端口：80 / 443；WAF 检查保留</div>
+        </div>
+      </div>
       <div class="waf-grid">
         <div class="waf-stat">&#39118;&#38505;&#25318;&#25130;<b id="risk-total">0</b></div>
         <div class="waf-stat">&#23433;&#20840;&#20445;&#25252;<b id="safe-days">1&#22825;</b></div>
@@ -1636,6 +1728,12 @@ EOF
   function post(s,data,ok){$.ajax({url:'/plugin?action=a&name=local_waf&s='+s,type:'POST',data:data||{},headers:{'x-http-token':window.vite_public_request_token||$('#request_token_head').attr('token')||''},success:function(r){r=unwrap(r); if(r&&r.status===false){layer.msg(r.msg||'error',{icon:2});return} ok&&ok(r||{})},error:function(){layer.msg('request failed',{icon:2})}})}
   function regionName(c){return (REGION_NAMES[c]||countries[c]||c)+' ('+c+')'}
   function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+  function originWhitelistRequest(save){
+    var button=$('#origin-whitelist-save'); button.prop('disabled',true);
+    $.ajax({url:'/plugin?action=a&name=local_waf&s='+(save?'save_origin_whitelist':'get_origin_whitelist'),type:'POST',data:save?{entries:$('#origin-whitelist').val()}:{},headers:{'x-http-token':window.vite_public_request_token||$('#request_token_head').attr('token')||''},success:function(raw){var r=unwrap(raw); if(r.status===false){$('#origin-whitelist-result').text(r.msg||'操作失败');return} $('#origin-whitelist').val((r.entries||[]).join('\n')); $('#origin-whitelist-result').text(save?'已保存':''); button.data('loaded',true)},error:function(){$('#origin-whitelist-result').text('请求失败，请重新打开面板')},complete:function(){button.prop('disabled',!button.data('loaded'))}});
+  }
+  $('#origin-whitelist-save').on('click',function(){originWhitelistRequest(true)});
+  originWhitelistRequest(false);
   function setChecks(features){features=features||{}; $('[data-feature]').each(function(){var k=$(this).data('feature'); $(this).prop('checked', typeof features[k]==='undefined'?true:!!features[k])})}
   function renderRuleTable(){var items=[['sql','SQL\u6ce8\u5165\u9632\u5fa1','\u68c0\u6d4b\u6076\u610fSQL\u8bed\u53e5'],['xss','XSS\u9632\u5fa1','\u68c0\u6d4b\u811a\u672c\u6ce8\u5165'],['command','\u547d\u4ee4\u6267\u884c\u62e6\u622a','\u62e6\u622a\u5371\u9669\u547d\u4ee4\u6267\u884c\u7279\u5f81'],['weak_password','\u5f31\u5bc6\u7801\u9632\u5fa1','\u62e6\u622a\u660e\u663e\u5f31\u53e3\u4ee4\u63a2\u6d4b'],['sensitive_path','\u6076\u610f\u626b\u63cf\u62e6\u622a','\u62e6\u622a\u654f\u611f\u6587\u4ef6\u548c\u76ee\u5f55\u7a7f\u8d8a'],['php_code','PHP\u4ee3\u7801\u62e6\u622a','\u62e6\u622a\u5e38\u89c1WebShell\u51fd\u6570\u7279\u5f81'],['upload','\u6587\u4ef6\u4e0a\u4f20\u62e6\u622a','\u62e6\u622a\u5371\u9669\u811a\u672c\u6269\u5c55\u4e0a\u4f20']]; var h=''; $.each(items,function(_,x){h+='<tr><td>'+x[1]+'</td><td>'+x[2]+'</td><td class=\"resp-code\">'+(cfg.response_code||403)+'</td><td><input class=\"waf-check feature-check\" data-feature=\"'+x[0]+'\" type=\"checkbox\"></td></tr>'}); $('#rule-table').html(h); setChecks(cfg.features)}
   function renderSpiderPolicies(){cfg.spiders=$.extend({},RECOMMENDED_SPIDERS,cfg.spiders||{}); var h=''; $.each(SPIDER_DEFS,function(_,x){var key=x[0],verify=x[3],policy=cfg.spiders[key]||'allow',options='<option value="allow">\u653e\u884c</option>'; if(verify) options+='<option value="verify">\u5b98\u65b9 IP \u9a8c\u8bc1\u540e\u653e\u884c</option>'; options+='<option value="block">\u5c4f\u853d</option>'; var note=verify?'\u53ef\u9a8c\u8bc1\u5b98\u65b9 IP \u6bb5<span class="waf-verify-badge">IP \u9a8c\u8bc1</span>':'\u6309 UA \u7c7b\u578b\u8bc6\u522b'; h+='<tr><td>'+esc(x[1])+'</td><td>'+esc(x[2])+'</td><td><select class="bt-input-text waf-spider-policy" data-spider="'+key+'">'+options+'</select></td><td class="waf-policy-note">'+note+'</td></tr>'}); $('#spider-table').html(h); $('.waf-spider-policy').each(function(){$(this).val(cfg.spiders[$(this).data('spider')]||'allow')})}
