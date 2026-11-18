@@ -154,16 +154,35 @@ setup_logrotate() {
     cat > /etc/logrotate.d/nginx_bt_cpu_fix <<'EOF'
 /www/wwwlogs/*.log {
     daily
-    rotate 7
+    rotate 168
+    maxage 7
     missingok
     notifempty
     compress
-    delaycompress
+    compressoptions -1
     dateext
-    copytruncate
+    dateformat -%Y%m%d-%H%M%S
+    create 0644 root root
     maxsize 200M
+    sharedscripts
+    postrotate
+        /www/server/nginx/sbin/nginx.real_btclean -p /www/server/nginx/ -c /www/server/nginx/conf/nginx.conf -s reopen
+    endscript
 }
 EOF
+    if command -v systemctl >/dev/null 2>&1 && systemctl cat logrotate.timer >/dev/null 2>&1; then
+        mkdir -p /etc/systemd/system/logrotate.timer.d
+        cat > /etc/systemd/system/logrotate.timer.d/bt-log-size.conf <<'EOF'
+[Timer]
+OnCalendar=
+OnCalendar=*-*-* *:00/10:00
+RandomizedDelaySec=0
+AccuracySec=1min
+EOF
+        systemctl daemon-reload
+        systemctl enable --now logrotate.timer
+        systemctl restart logrotate.timer
+    fi
 }
 
 setup_search_spider_ip_verification() {

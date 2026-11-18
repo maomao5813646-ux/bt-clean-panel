@@ -111,6 +111,13 @@ EOF
 EOF
   chmod 644 /etc/cron.d/bt-local-waf-logrotate
   cat > "$WAF_DIR/waf.lua" <<'EOF'
+-- A failed shared-memory increment must not abort request processing.
+local function safe_counter_incr(dict, key, delta, initial, ttl)
+    local value = dict:incr(key, delta, initial, ttl)
+    if type(value) == "number" then return value end
+    return tonumber(dict:get(key)) or 0
+end
+
 local bt_waf_cpath_suffix = ";/usr/lib/x86_64-linux-gnu/lua/5.1/?.so;/usr/lib64/lua/5.1/?.so;/usr/local/lib/lua/5.1/?.so;/usr/lib/lua/5.1/?.so"
 if not string.find(package.cpath, bt_waf_cpath_suffix, 1, true) then
     package.cpath = package.cpath .. bt_waf_cpath_suffix
@@ -646,11 +653,11 @@ if features.automation and not trusted_spider and
         if dict:get(block_key) then
             return deny(cfg, "automation", "rotating_home_block")
         end
-        local requests = dict:incr(prefix .. ":requests", 1, 0, window)
+        local requests = safe_counter_incr(dict, prefix .. ":requests", 1, 0, window)
         local ips = tonumber(dict:get(prefix .. ":ips") or 0) or 0
         local ip_key = prefix .. ":ip:" .. bounded_hash(ip, 1024)
         if dict:add(ip_key, true, window) then
-            ips = dict:incr(prefix .. ":ips", 1, 0, window)
+            ips = safe_counter_incr(dict, prefix .. ":ips", 1, 0, window)
         end
         if requests > math.max(240, distributed_limit * 3) and
            ips > math.max(36, distributed_ip_limit * 3) then
@@ -705,11 +712,11 @@ if features.automation and not trusted_spider and not is_search_referer(referer)
     local distributed_limit = tonumber(cfg.automation_distributed_limit or 80) or 80
     local distributed_ip_limit = tonumber(cfg.automation_distributed_ip_limit or 12) or 12
     local block_time = tonumber(cfg.automation_block_time or 300) or 300
-    local requests = dict:incr("automation_req:" .. scope, 1, 0, window)
+    local requests = safe_counter_incr(dict, "automation_req:" .. scope, 1, 0, window)
     local distinct_key = "automation_seen:" .. scope .. ":" .. ngx.md5(uri .. "?" .. args)
     local distinct = tonumber(dict:get("automation_distinct:" .. scope) or 0) or 0
     if dict:add(distinct_key, true, window) then
-        distinct = dict:incr("automation_distinct:" .. scope, 1, 0, window)
+        distinct = safe_counter_incr(dict, "automation_distinct:" .. scope, 1, 0, window)
     end
 
     -- Distributed automation keeps each source below the per-IP threshold. Build
@@ -730,17 +737,17 @@ if features.automation and not trusted_spider and not is_search_referer(referer)
     end
 
     local function distributed_counters(prefix, ip_buckets, path_buckets, path_material)
-        local req_count = dict:incr("automation_fp_req:" .. prefix, 1, 0, window)
+        local req_count = safe_counter_incr(dict, "automation_fp_req:" .. prefix, 1, 0, window)
         local ip_count = tonumber(dict:get("automation_fp_ips:" .. prefix) or 0) or 0
         local ip_key = "automation_fp_ip:" .. prefix .. ":" .. bounded_hash(ip, ip_buckets or 256)
         if dict:add(ip_key, true, window) then
-            ip_count = dict:incr("automation_fp_ips:" .. prefix, 1, 0, window)
+            ip_count = safe_counter_incr(dict, "automation_fp_ips:" .. prefix, 1, 0, window)
         end
         local path_count = tonumber(dict:get("automation_fp_paths:" .. prefix) or 0) or 0
         local path_key = "automation_fp_path:" .. prefix .. ":" ..
                          bounded_hash(path_material or (uri .. "?" .. args), path_buckets or 128)
         if dict:add(path_key, true, window) then
-            path_count = dict:incr("automation_fp_paths:" .. prefix, 1, 0, window)
+            path_count = safe_counter_incr(dict, "automation_fp_paths:" .. prefix, 1, 0, window)
         end
         return req_count, ip_count, path_count
     end
@@ -893,7 +900,7 @@ if features.sensitive_path and (method == "GET" or method == "HEAD") and
         local seen_key = "path_scan_seen:" .. scan_scope .. ":" .. ngx.md5(uri)
         if dict:add(seen_key, true, scan_window) then
             local count_key = "path_scan_count:" .. scan_scope
-            local scan_count = dict:incr(count_key, 1, 0, scan_window)
+            local scan_count = safe_counter_incr(dict, count_key, 1, 0, scan_window)
             if scan_count > scan_limit then
                 dict:set(blocked_key, true, tonumber(cfg.scan_block_time or 60) or 60)
                 return deny(cfg, "sensitive_path", "path_enumeration=" .. tostring(scan_count))
@@ -905,7 +912,7 @@ end
 if features.cc then
     local dict = ngx.shared.local_waf_cache
     local key = "cc:" .. ip .. ":" .. uri
-    local n = dict:incr(key, 1, 0, tonumber(cfg.cc_window or 10) or 10)
+    local n = safe_counter_incr(dict, key, 1, 0, tonumber(cfg.cc_window or 10) or 10)
     if n > (tonumber(cfg.cc_limit or 60) or 60) then
         return deny(cfg, "cc", "limit=" .. tostring(n))
     end
@@ -916,7 +923,7 @@ if features.cc then
         local distributed_window = tonumber(cfg.distributed_window or 5) or 5
         local distributed_limit = tonumber(cfg.distributed_limit or 120) or 120
         local distributed_key = "cc_distributed:" .. host .. ":" .. uri
-        local distributed_n = dict:incr(distributed_key, 1, 0, distributed_window)
+        local distributed_n = safe_counter_incr(dict, distributed_key, 1, 0, distributed_window)
         if distributed_n > distributed_limit then
             return deny(cfg, "cc_distributed", "limit=" .. tostring(distributed_n))
         end
